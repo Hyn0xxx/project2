@@ -28,52 +28,91 @@ try {
 }
 
 // --------------------
-// СОЗДАНИЕ ТАБЛИЦ (если не существуют)
+// СОЗДАНИЕ ТАБЛИЦ (автоматически)
 // --------------------
 
-$pdo->exec("
-    CREATE TABLE IF NOT EXISTS applications (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        full_name VARCHAR(255) NOT NULL,
-        phone VARCHAR(50) NOT NULL,
-        email VARCHAR(255) NOT NULL,
-        birth_date DATE NOT NULL,
-        gender ENUM('male', 'female', 'other') NOT NULL,
-        bio TEXT,
-        contract_accepted TINYINT(1) DEFAULT 0,
-        login VARCHAR(50) UNIQUE,
-        password_hash VARCHAR(255),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-");
-
-$pdo->exec("
-    CREATE TABLE IF NOT EXISTS programming_languages (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(100) UNIQUE NOT NULL
-    )
-");
-
-$pdo->exec("
-    CREATE TABLE IF NOT EXISTS application_languages (
-        application_id INT,
-        language_id INT,
-        PRIMARY KEY (application_id, language_id),
-        FOREIGN KEY (application_id) REFERENCES applications(id) ON DELETE CASCADE,
-        FOREIGN KEY (language_id) REFERENCES programming_languages(id) ON DELETE CASCADE
-    )
-");
-
-// Добавляем автомобили вместо языков программирования
-$cars = ['Porsche Panamera', 'Mercedes-Benz S-Class', 'BMW 7 Series', 'Audi A8', 'Lexus LS', 'Range Rover', 'Bentley Continental', 'Ferrari Roma'];
-$stmt = $pdo->prepare("INSERT IGNORE INTO programming_languages (name) VALUES (?)");
-foreach ($cars as $car) {
-    $stmt->execute([$car]);
+try {
+    // Отключаем проверку внешних ключей для безопасного удаления
+    $pdo->exec("SET FOREIGN_KEY_CHECKS = 0");
+    
+    // Удаляем старые связующие таблицы если есть
+    $pdo->exec("DROP TABLE IF EXISTS application_cars");
+    $pdo->exec("DROP TABLE IF EXISTS applications");
+    $pdo->exec("DROP TABLE IF EXISTS cars");
+    
+    // Включаем проверку обратно
+    $pdo->exec("SET FOREIGN_KEY_CHECKS = 1");
+    
+    // Создаем таблицу автомобилей
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS cars (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) UNIQUE NOT NULL,
+            brand VARCHAR(50),
+            price_min INT,
+            image_url VARCHAR(255),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+    
+    // Создаем таблицу заявок
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS applications (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            full_name VARCHAR(255) NOT NULL,
+            phone VARCHAR(50) NOT NULL,
+            email VARCHAR(255) NOT NULL,
+            birth_date DATE NOT NULL,
+            gender ENUM('male', 'female', 'other') NOT NULL,
+            bio TEXT,
+            contract_accepted TINYINT(1) DEFAULT 0,
+            login VARCHAR(50) UNIQUE,
+            password_hash VARCHAR(255),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+    
+    // Создаем связующую таблицу
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS application_cars (
+            application_id INT NOT NULL,
+            car_id INT NOT NULL,
+            PRIMARY KEY (application_id, car_id),
+            FOREIGN KEY (application_id) REFERENCES applications(id) ON DELETE CASCADE,
+            FOREIGN KEY (car_id) REFERENCES cars(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+    
+    // Добавляем автомобили (только если таблица пустая)
+    $checkCars = $pdo->query("SELECT COUNT(*) as cnt FROM cars")->fetch();
+    if ($checkCars['cnt'] == 0) {
+        $cars = [
+            ['Porsche Panamera', 'Porsche', 9500000, 'https://i.pinimg.com/1200x/b9/ea/01/b9ea017e55f040aea05079c907258b35.jpg'],
+            ['Mercedes-Benz S-Class', 'Mercedes-Benz', 12000000, 'https://i.pinimg.com/1200x/5d/74/97/5d749788759bc112b30f99158c4a2b87.jpg'],
+            ['BMW 7 Series', 'BMW', 8900000, 'https://i.pinimg.com/1200x/20/cc/3b/20cc3b1b0ec4220d4d4e35e73de480c9.jpg'],
+            ['Audi A8', 'Audi', 8500000, null],
+            ['Lexus LS', 'Lexus', 9200000, null],
+            ['Range Rover', 'Land Rover', 11000000, null],
+            ['Bentley Continental', 'Bentley', 18000000, null],
+            ['Ferrari Roma', 'Ferrari', 22000000, null]
+        ];
+        
+        $stmt = $pdo->prepare("INSERT INTO cars (name, brand, price_min, image_url) VALUES (?, ?, ?, ?)");
+        foreach ($cars as $car) {
+            $stmt->execute($car);
+        }
+    }
+    
+} catch(PDOException $e) {
+    // Если ошибка, просто логируем и продолжаем (таблицы уже существуют)
+    error_log('Table creation error: ' . $e->getMessage());
 }
 
-// Список автомобилей
-$carsList = $pdo->query("SELECT id, name FROM programming_languages ORDER BY name")->fetchAll();
-$allowedCarIds = array_column($carsList, 'id');
+// --------------------
+// ПОЛУЧАЕМ СПИСОК АВТОМОБИЛЕЙ
+// --------------------
+
+$carsList = $pdo->query("SELECT id, name, brand, price_min, image_url FROM cars ORDER BY name")->fetchAll();
 
 // --------------------
 // ФУНКЦИИ
@@ -93,12 +132,11 @@ function generatePassword($length = 10) {
 }
 
 // --------------------
-// ОБРАБОТКА (FALLBACK для отключенного JS)
+// ОБРАБОТКА ФОРМЫ
 // --------------------
 
 $messages = [];
 $loginError = '';
-$showLoginForm = !isset($_SESSION['user_id']);
 $justSaved = false;
 $errorMessages = [];
 
@@ -131,9 +169,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !isset($_POST['login_submit'])) {
         $errors = true;
     }
 
-    $selectedCars = $_POST['languages'] ?? [];
+    $selectedCars = $_POST['cars'] ?? [];
     if (empty($selectedCars)) {
-        $errorMessages['languages'] = 'Выберите хотя бы один автомобиль.';
+        $errorMessages['cars'] = 'Выберите хотя бы один автомобиль.';
         $errors = true;
     }
 
@@ -148,9 +186,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !isset($_POST['login_submit'])) {
         'email' => $_POST['email'] ?? '',
         'birth_date' => $_POST['birth_date'] ?? '',
         'gender' => $_POST['gender'] ?? '',
+        'cars' => $selectedCars,
         'bio' => $_POST['bio'] ?? '',
-        'contract' => isset($_POST['contract']),
-        'languages' => $selectedCars
+        'contract' => isset($_POST['contract'])
     ];
 
     if (!$errors) {
@@ -159,7 +197,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !isset($_POST['login_submit'])) {
 
             if (isset($_SESSION['user_id'])) {
                 // UPDATE
-                $appId = $_SESSION['user_id'];
                 $stmt = $pdo->prepare("
                     UPDATE applications
                     SET full_name=?, phone=?, email=?, birth_date=?, gender=?, bio=?, contract_accepted=?
@@ -173,10 +210,16 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !isset($_POST['login_submit'])) {
                     $_POST['gender'],
                     $_POST['bio'],
                     1,
-                    $appId
+                    $_SESSION['user_id']
                 ]);
                 
-                $pdo->prepare("DELETE FROM application_languages WHERE application_id=?")->execute([$appId]);
+                // Обновляем выбранные автомобили
+                $pdo->prepare("DELETE FROM application_cars WHERE application_id=?")->execute([$_SESSION['user_id']]);
+                $stmtCar = $pdo->prepare("INSERT INTO application_cars (application_id, car_id) VALUES (?, ?)");
+                foreach ($selectedCars as $carId) {
+                    $stmtCar->execute([$_SESSION['user_id'], $carId]);
+                }
+                
                 $messages[] = '✅ Данные успешно обновлены!';
             } else {
                 // INSERT
@@ -201,16 +244,17 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && !isset($_POST['login_submit'])) {
                 ]);
                 $appId = $pdo->lastInsertId();
                 
+                // Сохраняем выбранные автомобили
+                $stmtCar = $pdo->prepare("INSERT INTO application_cars (application_id, car_id) VALUES (?, ?)");
+                foreach ($selectedCars as $carId) {
+                    $stmtCar->execute([$appId, $carId]);
+                }
+                
                 $_SESSION['generated_login'] = $login;
                 $_SESSION['generated_password'] = $plainPassword;
                 $justSaved = true;
                 
                 $messages[] = '✅ Данные успешно сохранены!';
-            }
-
-            $stmtLang = $pdo->prepare("INSERT INTO application_languages (application_id, language_id) VALUES (?, ?)");
-            foreach ($selectedCars as $carId) {
-                $stmtLang->execute([$appId, $carId]);
             }
 
             $pdo->commit();
@@ -270,9 +314,9 @@ if (isset($formValues)) {
         $values['bio'] = $userData['bio'];
         $values['contract'] = $userData['contract_accepted'];
 
-        $stmt = $pdo->prepare("SELECT language_id FROM application_languages WHERE application_id=?");
+        $stmt = $pdo->prepare("SELECT car_id FROM application_cars WHERE application_id=?");
         $stmt->execute([$_SESSION['user_id']]);
-        $values['languages'] = array_column($stmt->fetchAll(), 'language_id');
+        $values['cars'] = array_column($stmt->fetchAll(), 'car_id');
     }
 } else {
     $values = [
@@ -281,9 +325,9 @@ if (isset($formValues)) {
         'email' => '',
         'birth_date' => '',
         'gender' => '',
+        'cars' => [],
         'bio' => '',
-        'contract' => false,
-        'languages' => []
+        'contract' => false
     ];
     $errors = [];
 }
@@ -299,7 +343,6 @@ if (isset($formValues)) {
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
-        /* Дополнительные стили для формы */
         .form-container {
             background: white;
             border-radius: 20px;
@@ -309,7 +352,7 @@ if (isset($formValues)) {
             margin: 0 auto;
         }
         .form-header {
-            background: var(--primary-color);
+            background: #0d1b2a;
             color: white;
             padding: 30px;
             text-align: center;
@@ -358,9 +401,6 @@ if (isset($formValues)) {
             border-radius: 8px;
             margin-bottom: 20px;
         }
-        .login-credentials p {
-            margin: 5px 0;
-        }
         .error-message {
             color: #dc3545;
             font-size: 0.85em;
@@ -369,10 +409,128 @@ if (isset($formValues)) {
         .form-error {
             border-color: #dc3545 !important;
         }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .form-group input, .form-group select, .form-group textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1em;
+        }
+        select[multiple] {
+            height: 150px;
+        }
+        .radio-group {
+            display: flex;
+            gap: 20px;
+            padding: 10px 0;
+        }
+        .form-checkbox {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .form-checkbox input {
+            margin-right: 10px;
+        }
+        .btn-submit {
+            background: #9E9E9E;
+            color: #800020;
+            border: none;
+            padding: 14px 30px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+            width: 100%;
+        }
+        .btn-submit:hover {
+            background: #757575;
+        }
+        .slider-container {
+            position: relative;
+            max-width: 900px;
+            margin: 0 auto;
+            overflow: hidden;
+        }
+        .slider {
+            display: flex;
+            transition: transform 0.5s ease;
+        }
+        .slide {
+            min-width: 100%;
+            padding: 40px;
+            text-align: center;
+        }
+        .slider-btn {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(0,0,0,0.5);
+            color: white;
+            border: none;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        .prev-btn { left: 10px; }
+        .next-btn { right: 10px; }
+        .slider-indicators {
+            text-align: center;
+            margin-top: 10px;
+        }
+        .indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ccc;
+            margin: 0 5px;
+            cursor: pointer;
+        }
+        .indicator.active {
+            background: #800020;
+        }
+        .services-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+        .service-card {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        .footer {
+            background: #0d1b2a;
+            color: white;
+            padding: 40px 0;
+        }
+        .footer-content {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 30px;
+        }
+        .social-icons a {
+            color: white;
+            margin-right: 15px;
+            font-size: 1.2rem;
+        }
+        @media (max-width: 768px) {
+            .form-body { padding: 20px; }
+            .services-grid { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
-    <!-- Шапка с видео -->
     <header class="header">
         <div class="video-background">
             <video autoplay muted loop playsinline>
@@ -392,7 +550,6 @@ if (isset($formValues)) {
                     <li><a href="#home">Главная</a></li>
                     <li><a href="#catalog">Каталог</a></li>
                     <li><a href="#services">Услуги</a></li>
-                    <li><a href="#about">О нас</a></li>
                     <li><a href="#form">Анкета</a></li>
                     <li><a href="admin.php" class="btn-admin"><i class="fas fa-shield-alt"></i> Администратору</a></li>
                 </ul>
@@ -412,7 +569,6 @@ if (isset($formValues)) {
                 <li><a href="#home">Главная</a></li>
                 <li><a href="#catalog">Каталог</a></li>
                 <li><a href="#services">Услуги</a></li>
-                <li><a href="#about">О нас</a></li>
                 <li><a href="#form">Анкета</a></li>
                 <li><a href="admin.php"><i class="fas fa-shield-alt"></i> Админ-панель</a></li>
             </ul>
@@ -428,7 +584,6 @@ if (isset($formValues)) {
     </header>
 
     <main>
-        <!-- Популярные модели (слайдер) -->
         <section class="popular-models" id="catalog">
             <div class="container">
                 <h2 class="section-title">Популярные модели</h2>
@@ -436,55 +591,26 @@ if (isset($formValues)) {
                 
                 <div class="slider-container">
                     <div class="slider">
-                        <div class="slide active">
-                            <div class="slide-image">
-                                <img src="https://i.pinimg.com/1200x/b9/ea/01/b9ea017e55f040aea05079c907258b35.jpg" alt="Porsche Panamera" class="car-image">
-                                <div class="car-model-badge">Porsche</div>
-                            </div>
-                            <div class="slide-content">
-                                <h3>Porsche Panamera</h3>
-                                <p class="slide-description">Спортивная элегантность и мощность</p>
-                                <p class="slide-price">от 9 500 000 ₽</p>
-                                <a href="#form" class="btn-order">Оставить заявку</a>
-                            </div>
+                        <?php foreach ($carsList as $index => $car): ?>
+                        <div class="slide <?= $index === 0 ? 'active' : '' ?>">
+                            <h3><?= htmlspecialchars($car['name']) ?></h3>
+                            <p><?= htmlspecialchars($car['brand']) ?></p>
+                            <p class="slide-price">от <?= number_format($car['price_min'], 0, '', ' ') ?> ₽</p>
+                            <a href="#form" class="btn-order">Оставить заявку</a>
                         </div>
-                        <div class="slide">
-                            <div class="slide-image">
-                                <img src="https://i.pinimg.com/1200x/5d/74/97/5d749788759bc112b30f99158c4a2b87.jpg" alt="Mercedes-Benz S-Class" class="car-image">
-                                <div class="car-model-badge">Mercedes-Benz</div>
-                            </div>
-                            <div class="slide-content">
-                                <h3>Mercedes-Benz S-Class</h3>
-                                <p class="slide-description">Роскошь и инновации</p>
-                                <p class="slide-price">от 12 000 000 ₽</p>
-                                <a href="#form" class="btn-order">Оставить заявку</a>
-                            </div>
-                        </div>
-                        <div class="slide">
-                            <div class="slide-image">
-                                <img src="https://i.pinimg.com/1200x/20/cc/3b/20cc3b1b0ec4220d4d4e35e73de480c9.jpg" alt="BMW 7 Series" class="car-image">
-                                <div class="car-model-badge">BMW</div>
-                            </div>
-                            <div class="slide-content">
-                                <h3>BMW 7 Series</h3>
-                                <p class="slide-description">Динамика и комфорт</p>
-                                <p class="slide-price">от 8 900 000 ₽</p>
-                                <a href="#form" class="btn-order">Оставить заявку</a>
-                            </div>
-                        </div>
+                        <?php endforeach; ?>
                     </div>
                     <button class="slider-btn prev-btn" id="prevBtn"><i class="fas fa-chevron-left"></i></button>
                     <button class="slider-btn next-btn" id="nextBtn"><i class="fas fa-chevron-right"></i></button>
                     <div class="slider-indicators">
-                        <span class="indicator active" data-slide="0"></span>
-                        <span class="indicator" data-slide="1"></span>
-                        <span class="indicator" data-slide="2"></span>
+                        <?php foreach ($carsList as $index => $car): ?>
+                        <span class="indicator <?= $index === 0 ? 'active' : '' ?>" data-slide="<?= $index ?>"></span>
+                        <?php endforeach; ?>
                     </div>
                 </div>
             </div>
         </section>
 
-        <!-- Услуги -->
         <section class="services" id="services">
             <div class="container">
                 <h2 class="section-title">Наши услуги</h2>
@@ -500,7 +626,6 @@ if (isset($formValues)) {
             </div>
         </section>
 
-        <!-- ФОРМА АНКЕТЫ -->
         <section class="contact-form-section" id="form">
             <div class="container">
                 <div class="form-container">
@@ -511,10 +636,10 @@ if (isset($formValues)) {
                     <div class="form-body">
                         <?php if (!empty($_SESSION['generated_login']) && $justSaved): ?>
                             <div class="login-credentials">
-                                <strong>✅ Ваши данные для входа для редактирования анкеты:</strong><br>
+                                <strong>✅ Ваши данные для входа:</strong><br>
                                 Логин: <b><?= htmlspecialchars($_SESSION['generated_login']) ?></b><br>
                                 Пароль: <b><?= htmlspecialchars($_SESSION['generated_password']) ?></b><br>
-                                <small>⚠️ Сохраните их! Теперь вы можете авторизоваться и редактировать свои данные.</small>
+                                <small>⚠️ Сохраните их для редактирования анкеты!</small>
                             </div>
                             <?php unset($_SESSION['generated_login'], $_SESSION['generated_password']); ?>
                         <?php endif; ?>
@@ -527,16 +652,16 @@ if (isset($formValues)) {
                             <div class="auth-card">
                                 <h3>🔐 Авторизация для редактирования</h3>
                                 <?php if ($loginError): ?>
-                                    <div class="error-message" style="margin-bottom:10px;"><?= $loginError ?></div>
+                                    <div class="error-message"><?= $loginError ?></div>
                                 <?php endif; ?>
-                                <form method="POST" id="loginForm">
+                                <form method="POST">
                                     <div class="form-group">
-                                        <input type="text" name="login" placeholder="Логин" style="width:100%; padding:12px; border-radius:8px; border:1px solid #ddd;">
+                                        <input type="text" name="login" placeholder="Логин">
                                     </div>
                                     <div class="form-group">
-                                        <input type="password" name="password" placeholder="Пароль" style="width:100%; padding:12px; border-radius:8px; border:1px solid #ddd;">
+                                        <input type="password" name="password" placeholder="Пароль">
                                     </div>
-                                    <button type="submit" name="login_submit" class="btn-submit" style="background:#6c757d;">Войти</button>
+                                    <button type="submit" name="login_submit" class="btn-submit">Войти</button>
                                 </form>
                             </div>
                         <?php else: ?>
@@ -546,30 +671,29 @@ if (isset($formValues)) {
                             </div>
                         <?php endif; ?>
 
-                        <!-- Форма анкеты -->
-                        <form method="POST" id="applicationForm" data-ajax="true">
+                        <form method="POST" id="applicationForm">
                             <div class="form-group">
                                 <label>ФИО *</label>
-                                <input type="text" name="full_name" id="full_name" value="<?= htmlspecialchars($values['full_name'] ?? '') ?>" class="<?= isset($errors['full_name']) ? 'form-error' : '' ?>">
-                                <div class="error-message" id="error_full_name"><?= $errors['full_name'] ?? '' ?></div>
+                                <input type="text" name="full_name" value="<?= htmlspecialchars($values['full_name'] ?? '') ?>">
+                                <div class="error-message"><?= $errors['full_name'] ?? '' ?></div>
                             </div>
 
                             <div class="form-group">
                                 <label>Телефон *</label>
-                                <input type="tel" name="phone" id="phone" value="<?= htmlspecialchars($values['phone'] ?? '') ?>" class="<?= isset($errors['phone']) ? 'form-error' : '' ?>">
-                                <div class="error-message" id="error_phone"><?= $errors['phone'] ?? '' ?></div>
+                                <input type="tel" name="phone" value="<?= htmlspecialchars($values['phone'] ?? '') ?>">
+                                <div class="error-message"><?= $errors['phone'] ?? '' ?></div>
                             </div>
 
                             <div class="form-group">
                                 <label>E-mail *</label>
-                                <input type="email" name="email" id="email" value="<?= htmlspecialchars($values['email'] ?? '') ?>" class="<?= isset($errors['email']) ? 'form-error' : '' ?>">
-                                <div class="error-message" id="error_email"><?= $errors['email'] ?? '' ?></div>
+                                <input type="email" name="email" value="<?= htmlspecialchars($values['email'] ?? '') ?>">
+                                <div class="error-message"><?= $errors['email'] ?? '' ?></div>
                             </div>
 
                             <div class="form-group">
                                 <label>Дата рождения *</label>
-                                <input type="date" name="birth_date" id="birth_date" value="<?= htmlspecialchars($values['birth_date'] ?? '') ?>" class="<?= isset($errors['birth_date']) ? 'form-error' : '' ?>">
-                                <div class="error-message" id="error_birth_date"><?= $errors['birth_date'] ?? '' ?></div>
+                                <input type="date" name="birth_date" value="<?= htmlspecialchars($values['birth_date'] ?? '') ?>">
+                                <div class="error-message"><?= $errors['birth_date'] ?? '' ?></div>
                             </div>
 
                             <div class="form-group">
@@ -579,46 +703,42 @@ if (isset($formValues)) {
                                     <label><input type="radio" name="gender" value="female" <?= (($values['gender'] ?? '') == 'female') ? 'checked' : '' ?>> Женский</label>
                                     <label><input type="radio" name="gender" value="other" <?= (($values['gender'] ?? '') == 'other') ? 'checked' : '' ?>> Другой</label>
                                 </div>
-                                <div class="error-message" id="error_gender"><?= $errors['gender'] ?? '' ?></div>
+                                <div class="error-message"><?= $errors['gender'] ?? '' ?></div>
                             </div>
 
                             <div class="form-group">
                                 <label>Интересующие автомобили *</label>
-                                <select name="languages[]" id="languages" multiple class="<?= isset($errors['languages']) ? 'form-error' : '' ?>">
+                                <select name="cars[]" multiple>
                                     <?php foreach ($carsList as $car): ?>
-                                        <option value="<?= $car['id'] ?>" <?= in_array($car['id'], $values['languages'] ?? []) ? 'selected' : '' ?>>
-                                            <?= htmlspecialchars($car['name']) ?>
+                                        <option value="<?= $car['id'] ?>" <?= in_array($car['id'], $values['cars'] ?? []) ? 'selected' : '' ?>>
+                                            <?= htmlspecialchars($car['brand'] . ' ' . $car['name']) ?> - от <?= number_format($car['price_min'], 0, '', ' ') ?> ₽
                                         </option>
                                     <?php endforeach; ?>
                                 </select>
-                                <small style="color:#666;">Удерживайте Ctrl (Cmd) для выбора нескольких</small>
-                                <div class="error-message" id="error_languages"><?= $errors['languages'] ?? '' ?></div>
+                                <small>Удерживайте Ctrl (Cmd) для выбора нескольких</small>
+                                <div class="error-message"><?= $errors['cars'] ?? '' ?></div>
                             </div>
 
                             <div class="form-group">
                                 <label>Пожелания к заказу</label>
-                                <textarea name="bio" id="bio" rows="4" placeholder="Опишите ваши пожелания: комплектация, цвет, дополнительные опции..."><?= htmlspecialchars($values['bio'] ?? '') ?></textarea>
+                                <textarea name="bio" rows="4" placeholder="Опишите ваши пожелания: комплектация, цвет, дополнительные опции..."><?= htmlspecialchars($values['bio'] ?? '') ?></textarea>
                             </div>
 
                             <div class="form-checkbox">
-                                <input type="checkbox" name="contract" id="contract" value="1" <?= !empty($values['contract']) ? 'checked' : '' ?>>
-                                <label for="contract">Я согласен с условиями обработки персональных данных *</label>
-                                <div class="error-message" id="error_contract"><?= $errors['contract'] ?? '' ?></div>
+                                <input type="checkbox" name="contract" value="1" <?= !empty($values['contract']) ? 'checked' : '' ?>>
+                                <label>Я согласен с условиями обработки персональных данных *</label>
+                                <div class="error-message"><?= $errors['contract'] ?? '' ?></div>
                             </div>
 
-                            <button type="submit" class="btn-submit" id="submitBtn">
-                                <span><?= isset($_SESSION['user_id']) ? '✏️ Обновить анкету' : '✉️ Отправить заявку' ?></span>
-                                <div class="spinner hidden" id="spinner"></div>
+                            <button type="submit" class="btn-submit">
+                                <?= isset($_SESSION['user_id']) ? '✏️ Обновить анкету' : '✉️ Отправить заявку' ?>
                             </button>
                         </form>
-
-                        <div id="ajaxMessage" class="form-message hidden" style="margin-top:20px;"></div>
                     </div>
                 </div>
             </div>
         </section>
 
-        <!-- Футер -->
         <footer class="footer" id="contacts">
             <div class="container">
                 <div class="footer-content">
@@ -654,100 +774,57 @@ if (isset($formValues)) {
 
     <script src="script.js"></script>
     <script>
-        // AJAX отправка формы
-        (function() {
-            const form = document.getElementById('applicationForm');
-            if (!form) return;
-            
-            const submitBtn = document.getElementById('submitBtn');
-            const spinner = document.getElementById('spinner');
-            const ajaxMessage = document.getElementById('ajaxMessage');
-            
-            function showMessage(text, type) {
-                ajaxMessage.textContent = text;
-                ajaxMessage.className = `form-message ${type}`;
-                ajaxMessage.classList.remove('hidden');
-                setTimeout(() => ajaxMessage.classList.add('hidden'), 5000);
-            }
-            
-            function clearErrors() {
-                document.querySelectorAll('.error-message').forEach(el => el.textContent = '');
-                document.querySelectorAll('.form-error').forEach(el => el.classList.remove('form-error'));
-            }
-            
-            function displayErrors(errors) {
-                for (const [field, message] of Object.entries(errors)) {
-                    const errorEl = document.getElementById(`error_${field}`);
-                    if (errorEl) {
-                        errorEl.textContent = message;
-                    }
-                    const inputEl = document.querySelector(`[name="${field}"]`);
-                    if (inputEl) inputEl.classList.add('form-error');
-                    if (field === 'languages') {
-                        document.getElementById('languages')?.classList.add('form-error');
-                    }
-                    if (field === 'contract') {
-                        document.getElementById('contract')?.closest('.form-checkbox')?.classList.add('form-error');
-                    }
-                }
-            }
-            
-            form.addEventListener('submit', async function(e) {
-                e.preventDefault();
-                
-                clearErrors();
-                submitBtn.disabled = true;
-                spinner.classList.remove('hidden');
-                submitBtn.querySelector('span').textContent = 'Отправка...';
-                
-                const formData = new FormData(form);
-                const data = {};
-                for (let [key, value] of formData.entries()) {
-                    if (key === 'languages[]') {
-                        if (!data.languages) data.languages = [];
-                        data.languages.push(value);
-                    } else {
-                        data[key] = value;
-                    }
-                }
-                
-                try {
-                    const isAuth = <?= isset($_SESSION['user_id']) ? 'true' : 'false' ?>;
-                    const url = isAuth ? 'api.php?action=update' : 'api.php?action=create';
-                    
-                    const response = await fetch(url, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(data)
-                    });
-                    
-                    const result = await response.json();
-                    
-                    if (result.success) {
-                        if (result.login && result.password) {
-                            showMessage(`✅ Заявка отправлена! Ваш логин: ${result.login}, пароль: ${result.password}. Сохраните их для редактирования.`, 'success');
-                            form.reset();
-                        } else if (result.message) {
-                            showMessage(result.message, 'success');
-                        }
-                        // Перезагружаем страницу чтобы обновить состояние авторизации
-                        setTimeout(() => window.location.reload(), 2000);
-                    } else {
-                        if (result.errors) {
-                            displayErrors(result.errors);
-                        }
-                        showMessage(result.message || 'Ошибка при отправке', 'error');
-                    }
-                } catch (error) {
-                    console.error('Error:', error);
-                    showMessage('Ошибка соединения. Попробуйте позже.', 'error');
-                } finally {
-                    submitBtn.disabled = false;
-                    spinner.classList.add('hidden');
-                    submitBtn.querySelector('span').textContent = <?= isset($_SESSION['user_id']) ? "'✏️ Обновить анкету'" : "'✉️ Отправить заявку'" ?>;
-                }
+        // Слайдер
+        const slider = document.querySelector('.slider');
+        const slides = document.querySelectorAll('.slide');
+        const prevBtn = document.getElementById('prevBtn');
+        const nextBtn = document.getElementById('nextBtn');
+        const indicators = document.querySelectorAll('.indicator');
+        let currentSlide = 0;
+        
+        function updateSlider() {
+            if (slider) slider.style.transform = `translateX(-${currentSlide * 100}%)`;
+            indicators.forEach((ind, i) => {
+                if (i === currentSlide) ind.classList.add('active');
+                else ind.classList.remove('active');
             });
-        })();
+        }
+        
+        if (prevBtn && nextBtn) {
+            nextBtn.addEventListener('click', () => {
+                currentSlide = (currentSlide + 1) % slides.length;
+                updateSlider();
+            });
+            prevBtn.addEventListener('click', () => {
+                currentSlide = (currentSlide - 1 + slides.length) % slides.length;
+                updateSlider();
+            });
+        }
+        
+        indicators.forEach((ind, i) => {
+            ind.addEventListener('click', () => {
+                currentSlide = i;
+                updateSlider();
+            });
+        });
+        
+        // Мобильное меню
+        const mobileMenuBtn = document.getElementById('mobileMenuBtn');
+        const mobileMenu = document.getElementById('mobileMenu');
+        const closeMenuBtn = document.getElementById('closeMenuBtn');
+        
+        if (mobileMenuBtn && mobileMenu) {
+            mobileMenuBtn.addEventListener('click', () => {
+                mobileMenu.classList.add('active');
+                document.body.style.overflow = 'hidden';
+            });
+            if (closeMenuBtn) {
+                closeMenuBtn.addEventListener('click', () => {
+                    mobileMenu.classList.remove('active');
+                    document.body.style.overflow = '';
+                });
+            }
+        }
     </script>
 </body>
 </html>

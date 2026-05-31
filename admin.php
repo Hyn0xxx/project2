@@ -27,18 +27,75 @@ try {
     die('Ошибка подключения к базе данных: ' . $e->getMessage());
 }
 
+// Создаем таблицы если нет
+try {
+    $pdo->exec("SET FOREIGN_KEY_CHECKS = 0");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS cars (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(100) UNIQUE NOT NULL,
+        brand VARCHAR(50),
+        price_min INT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB");
+    
+    $pdo->exec("CREATE TABLE IF NOT EXISTS applications (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        full_name VARCHAR(255) NOT NULL,
+        phone VARCHAR(50) NOT NULL,
+        email VARCHAR(255) NOT NULL,
+        birth_date DATE NOT NULL,
+        gender ENUM('male', 'female', 'other') NOT NULL,
+        bio TEXT,
+        contract_accepted TINYINT(1) DEFAULT 0,
+        login VARCHAR(50) UNIQUE,
+        password_hash VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB");
+    
+    $pdo->exec("CREATE TABLE IF NOT EXISTS application_cars (
+        application_id INT NOT NULL,
+        car_id INT NOT NULL,
+        PRIMARY KEY (application_id, car_id),
+        FOREIGN KEY (application_id) REFERENCES applications(id) ON DELETE CASCADE,
+        FOREIGN KEY (car_id) REFERENCES cars(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB");
+    
+    // Добавляем авто если пусто
+    $check = $pdo->query("SELECT COUNT(*) as cnt FROM cars")->fetch();
+    if ($check['cnt'] == 0) {
+        $cars = [
+            ['Porsche Panamera', 'Porsche', 9500000],
+            ['Mercedes-Benz S-Class', 'Mercedes-Benz', 12000000],
+            ['BMW 7 Series', 'BMW', 8900000],
+            ['Audi A8', 'Audi', 8500000],
+            ['Lexus LS', 'Lexus', 9200000],
+            ['Range Rover', 'Land Rover', 11000000],
+            ['Bentley Continental', 'Bentley', 18000000],
+            ['Ferrari Roma', 'Ferrari', 22000000]
+        ];
+        $stmt = $pdo->prepare("INSERT INTO cars (name, brand, price_min) VALUES (?, ?, ?)");
+        foreach ($cars as $car) $stmt->execute($car);
+    }
+    $pdo->exec("SET FOREIGN_KEY_CHECKS = 1");
+} catch(PDOException $e) {
+    error_log('Table error: ' . $e->getMessage());
+}
+
+// Получаем список автомобилей
+$carsList = $pdo->query("SELECT id, name, brand, price_min FROM cars ORDER BY name")->fetchAll();
+
 // Обработка удаления
 if (isset($_GET['delete']) && is_numeric($_GET['delete']) && isset($_GET['confirm'])) {
     $delete_id = (int)$_GET['delete'];
     try {
         $pdo->beginTransaction();
-        $pdo->prepare("DELETE FROM application_languages WHERE application_id = ?")->execute([$delete_id]);
+        $pdo->prepare("DELETE FROM application_cars WHERE application_id = ?")->execute([$delete_id]);
         $pdo->prepare("DELETE FROM applications WHERE id = ?")->execute([$delete_id]);
         $pdo->commit();
         $message = "✅ Пользователь успешно удален!";
     } catch(PDOException $e) {
         $pdo->rollBack();
-        $message = "❌ Ошибка при удалении: " . $e->getMessage();
+        $message = "❌ Ошибка: " . $e->getMessage();
     }
 }
 
@@ -48,54 +105,56 @@ $edit_user_data = null;
 
 if ($edit_id && $_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['update_user'])) {
     $user_id = (int)$_POST['user_id'];
-    $errors = [];
-    
-    if (empty($_POST['full_name']) || !preg_match('/^[a-zA-Zа-яА-ЯёЁ\s\-]+$/u', $_POST['full_name'])) {
-        $errors[] = 'Неверное ФИО';
-    }
-    if (empty($_POST['phone']) || !preg_match('/^(\+7|8)?[\s\-]?\(?[0-9]{3}\)?[\s\-]?[0-9]{3}[\s\-]?[0-9]{2}[\s\-]?[0-9]{2}$/', $_POST['phone'])) {
-        $errors[] = 'Неверный телефон';
-    }
-    if (empty($_POST['email']) || !filter_var($_POST['email'], FILTER_VALIDATE_EMAIL)) {
-        $errors[] = 'Неверный email';
-    }
-    
-    if (empty($errors)) {
-        try {
-            $pdo->beginTransaction();
-            $stmt = $pdo->prepare("UPDATE applications SET full_name=?, phone=?, email=?, birth_date=?, gender=?, bio=?, contract_accepted=? WHERE id=?");
-            $stmt->execute([$_POST['full_name'], $_POST['phone'], $_POST['email'], $_POST['birth_date'], $_POST['gender'], $_POST['bio'], 1, $user_id]);
-            $pdo->prepare("DELETE FROM application_languages WHERE application_id=?")->execute([$user_id]);
-            $stmtLang = $pdo->prepare("INSERT INTO application_languages (application_id, language_id) VALUES (?, ?)");
-            foreach ($_POST['languages'] ?? [] as $langId) {
-                $stmtLang->execute([$user_id, $langId]);
-            }
-            $pdo->commit();
-            $message = "✅ Данные обновлены!";
-            header("Location: admin.php");
-            exit();
-        } catch(PDOException $e) {
-            $pdo->rollBack();
-            $message = "❌ Ошибка: " . $e->getMessage();
+    try {
+        $pdo->beginTransaction();
+        $stmt = $pdo->prepare("UPDATE applications SET full_name=?, phone=?, email=?, birth_date=?, gender=?, bio=?, contract_accepted=? WHERE id=?");
+        $stmt->execute([$_POST['full_name'], $_POST['phone'], $_POST['email'], $_POST['birth_date'], $_POST['gender'], $_POST['bio'], 1, $user_id]);
+        
+        $pdo->prepare("DELETE FROM application_cars WHERE application_id=?")->execute([$user_id]);
+        $stmtCar = $pdo->prepare("INSERT INTO application_cars (application_id, car_id) VALUES (?, ?)");
+        foreach ($_POST['cars'] ?? [] as $carId) {
+            $stmtCar->execute([$user_id, $carId]);
         }
+        
+        $pdo->commit();
+        $message = "✅ Данные обновлены!";
+        header("Location: admin.php");
+        exit();
+    } catch(PDOException $e) {
+        $pdo->rollBack();
+        $message = "❌ Ошибка: " . $e->getMessage();
     }
 }
 
 if ($edit_id) {
-    $stmt = $pdo->prepare("SELECT a.*, GROUP_CONCAT(al.language_id) as language_ids FROM applications a LEFT JOIN application_languages al ON a.id = al.application_id WHERE a.id = ? GROUP BY a.id");
+    $stmt = $pdo->prepare("SELECT * FROM applications WHERE id = ?");
     $stmt->execute([$edit_id]);
     $edit_user_data = $stmt->fetch();
-    if ($edit_user_data && $edit_user_data['language_ids']) {
-        $edit_user_data['languages'] = explode(',', $edit_user_data['language_ids']);
-    } else {
-        $edit_user_data['languages'] = [];
+    if ($edit_user_data) {
+        $stmt = $pdo->prepare("SELECT car_id FROM application_cars WHERE application_id = ?");
+        $stmt->execute([$edit_id]);
+        $edit_user_data['cars'] = array_column($stmt->fetchAll(), 'car_id');
     }
 }
 
-// Получение данных
-$carsList = $pdo->query("SELECT id, name FROM programming_languages ORDER BY name")->fetchAll();
-$users = $pdo->query("SELECT a.*, GROUP_CONCAT(pl.name SEPARATOR ', ') as languages_names FROM applications a LEFT JOIN application_languages al ON a.id = al.application_id LEFT JOIN programming_languages pl ON al.language_id = pl.id GROUP BY a.id ORDER BY a.id DESC")->fetchAll();
-$stats = $pdo->query("SELECT pl.id, pl.name, COUNT(al.application_id) as count FROM programming_languages pl LEFT JOIN application_languages al ON pl.id = al.language_id GROUP BY pl.id ORDER BY count DESC")->fetchAll();
+// Получение данных для таблицы
+$users = $pdo->query("
+    SELECT a.*, GROUP_CONCAT(c.name SEPARATOR ', ') as cars_names
+    FROM applications a
+    LEFT JOIN application_cars ac ON a.id = ac.application_id
+    LEFT JOIN cars c ON ac.car_id = c.id
+    GROUP BY a.id
+    ORDER BY a.id DESC
+")->fetchAll();
+
+$stats = $pdo->query("
+    SELECT c.id, c.name, COUNT(ac.application_id) as count
+    FROM cars c
+    LEFT JOIN application_cars ac ON c.id = ac.car_id
+    GROUP BY c.id
+    ORDER BY count DESC
+")->fetchAll();
+
 $total_users = count($users);
 ?>
 
@@ -168,7 +227,9 @@ $total_users = count($users);
             <?php else: ?>
                 <div class="table-wrapper">
                     <table>
-                        <thead><tr><th>ID</th><th>ФИО</th><th>Телефон</th><th>Email</th><th>Дата рождения</th><th>Пол</th><th>Автомобили</th><th>Действия</th></tr></thead>
+                        <thead>
+                            <tr><th>ID</th><th>ФИО</th><th>Телефон</th><th>Email</th><th>Дата рождения</th><th>Пол</th><th>Автомобили</th><th>Действия</th></tr>
+                        </thead>
                         <tbody>
                             <?php foreach ($users as $user): ?>
                             <tr>
@@ -178,7 +239,7 @@ $total_users = count($users);
                                 <td><?= htmlspecialchars($user['email']) ?></td>
                                 <td><?= htmlspecialchars($user['birth_date']) ?></td>
                                 <td><?= ['male'=>'Мужской','female'=>'Женский','other'=>'Другой'][$user['gender']] ?? $user['gender'] ?></td>
-                                <td><?= htmlspecialchars($user['languages_names'] ?: '-') ?></td>
+                                <td><?= htmlspecialchars($user['cars_names'] ?: '-') ?></td>
                                 <td><a href="?edit=<?= $user['id'] ?>" class="btn-edit">✏️ Редакт.</a> <a href="?delete=<?= $user['id'] ?>" class="btn-delete" onclick="return confirmDelete(event, <?= $user['id'] ?>, '<?= htmlspecialchars(addslashes($user['full_name'])) ?>')">🗑️ Удалить</a></td>
                             </tr>
                             <?php endforeach; ?>
@@ -200,7 +261,7 @@ $total_users = count($users);
                 <div class="form-group"><label>Email *</label><input type="email" name="email" value="<?= htmlspecialchars($edit_user_data['email']) ?>" required></div>
                 <div class="form-group"><label>Дата рождения *</label><input type="date" name="birth_date" value="<?= htmlspecialchars($edit_user_data['birth_date']) ?>" required></div>
                 <div class="form-group"><label>Пол *</label><select name="gender" required><option value="male" <?= $edit_user_data['gender']=='male'?'selected':'' ?>>Мужской</option><option value="female" <?= $edit_user_data['gender']=='female'?'selected':'' ?>>Женский</option><option value="other" <?= $edit_user_data['gender']=='other'?'selected':'' ?>>Другой</option></select></div>
-                <div class="form-group"><label>Автомобили *</label><select name="languages[]" multiple required><?php foreach ($carsList as $car): ?><option value="<?= $car['id'] ?>" <?= in_array($car['id'], $edit_user_data['languages']) ? 'selected' : '' ?>><?= htmlspecialchars($car['name']) ?></option><?php endforeach; ?></select></div>
+                <div class="form-group"><label>Автомобили *</label><select name="cars[]" multiple required><?php foreach ($carsList as $car): ?><option value="<?= $car['id'] ?>" <?= in_array($car['id'], $edit_user_data['cars'] ?? []) ? 'selected' : '' ?>><?= htmlspecialchars($car['brand'] . ' ' . $car['name']) ?></option><?php endforeach; ?></select></div>
                 <div class="form-group"><label>Пожелания</label><textarea name="bio" rows="4"><?= htmlspecialchars($edit_user_data['bio']) ?></textarea></div>
                 <div class="form-group"><label><input type="checkbox" name="contract" value="1" <?= $edit_user_data['contract_accepted'] ? 'checked' : '' ?> required> Согласие на обработку *</label></div>
                 <button type="submit" name="update_user" class="btn-submit">💾 Сохранить</button>
